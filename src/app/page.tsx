@@ -71,7 +71,7 @@ export default function StatusPage() {
     "Subdomains",
     "API Endpoints",
     "External Services",
-    "SSL Certificates",
+    "SSL & Domain",
   ];
 
   for (const monitor of monitors) {
