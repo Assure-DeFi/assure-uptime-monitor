@@ -79,45 +79,43 @@ async function checkSslCertificate(url: string): Promise<{
   daysRemaining: number;
   error: string | null;
 }> {
+  const tls = await import("tls");
+
   return new Promise((resolve) => {
     const parsedUrl = new URL(url);
-    const options = {
-      hostname: parsedUrl.hostname,
-      port: 443,
-      method: "HEAD",
-      timeout: 10000,
-      rejectUnauthorized: false,
-    };
 
-    const req = https.request(options, (res) => {
-      const socket = res.socket as import("tls").TLSSocket;
-      if (socket && typeof socket.getPeerCertificate === "function") {
+    const socket = tls.connect(
+      {
+        host: parsedUrl.hostname,
+        port: 443,
+        rejectUnauthorized: false,
+        timeout: 10000,
+      },
+      () => {
         const cert = socket.getPeerCertificate();
         if (cert && cert.valid_to) {
           const expiryDate = new Date(cert.valid_to);
           const now = new Date();
           const diffMs = expiryDate.getTime() - now.getTime();
           const daysRemaining = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+          socket.destroy();
           resolve({ daysRemaining, error: null });
         } else {
+          socket.destroy();
           resolve({ daysRemaining: -1, error: "No certificate found" });
         }
-      } else {
-        resolve({ daysRemaining: -1, error: "Could not access TLS socket" });
-      }
-      res.resume();
-    });
+      },
+    );
 
-    req.on("error", (err: Error) => {
+    socket.on("error", (err: Error) => {
+      socket.destroy();
       resolve({ daysRemaining: -1, error: err.message });
     });
 
-    req.on("timeout", () => {
-      req.destroy();
+    socket.on("timeout", () => {
+      socket.destroy();
       resolve({ daysRemaining: -1, error: "SSL check timed out" });
     });
-
-    req.end();
   });
 }
 
@@ -273,8 +271,14 @@ async function performHttpCheck(
     let keywordFound: number | null = null;
 
     if (statusCode !== monitor.expected_status) {
-      status = "down";
-      errorMessage = `Expected status ${monitor.expected_status}, got ${statusCode}`;
+      // 429 (rate limited) is degraded, not down — the service is up but throttling us
+      if (statusCode === 429) {
+        status = "degraded";
+        errorMessage = `Rate limited (HTTP 429)`;
+      } else {
+        status = "down";
+        errorMessage = `Expected status ${monitor.expected_status}, got ${statusCode}`;
+      }
     }
 
     if (monitor.expected_keyword) {
