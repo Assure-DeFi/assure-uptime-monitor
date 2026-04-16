@@ -1,0 +1,12 @@
+{
+  "installed_at": "2026-02-03T20:29:31Z",
+  "installed_versions": {
+    "pm-review": "3.1.0",
+    "pm-banger": "3.0.0",
+    "pm-quick": "3.0.0",
+    "pm-focus": "3.0.0",
+    "execute-approved": "2.10.0",
+    "mason-update": "2.1.0",
+    "battle-test": "1.0.0"
+  }
+}
