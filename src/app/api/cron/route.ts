@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    seedMonitors();
+    await seedMonitors();
 
     // Determine which priority to check based on query param or run all
     const searchParams = request.nextUrl.searchParams;
@@ -24,7 +24,7 @@ export async function GET(request: NextRequest) {
 
     // Clean old results once per day (when running full checks)
     if (!priority) {
-      cleanOldCheckResults(90);
+      await cleanOldCheckResults(90);
     }
 
     return NextResponse.json({

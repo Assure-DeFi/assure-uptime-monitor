@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const incidents = getAllIncidents(100);
+    const incidents = await getAllIncidents(100);
     return NextResponse.json({
       incidents,
       timestamp: new Date().toISOString(),
@@ -44,7 +44,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const incident = createIncident({
+    const incident = await createIncident({
       title,
       description,
       monitor_id,
