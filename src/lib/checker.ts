@@ -88,6 +88,7 @@ async function checkSslCertificate(url: string): Promise<{
       {
         host: parsedUrl.hostname,
         port: 443,
+        servername: parsedUrl.hostname,
         rejectUnauthorized: false,
         timeout: 10000,
       },
