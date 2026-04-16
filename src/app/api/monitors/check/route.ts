@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
-    seedMonitors();
+    await seedMonitors();
 
     const body = await request.json().catch(() => ({}));
     const priority =

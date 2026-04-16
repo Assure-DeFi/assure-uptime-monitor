@@ -14,14 +14,14 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const monitor = getMonitorById(id);
+    const monitor = await getMonitorById(id);
 
     if (!monitor) {
       return NextResponse.json({ error: "Monitor not found" }, { status: 404 });
     }
 
-    const latestCheck = getLatestCheckResult(id);
-    const history = getCheckResultsForMonitor(id, 200);
+    const latestCheck = await getLatestCheckResult(id);
+    const history = await getCheckResultsForMonitor(id, 200);
 
     return NextResponse.json({
       monitor: {
@@ -32,10 +32,10 @@ export async function GET(
         ssl_days_remaining: latestCheck?.ssl_days_remaining ?? null,
       },
       uptime: {
-        "24h": getUptimePercentage(id, 24),
-        "7d": getUptimePercentage(id, 168),
-        "30d": getUptimePercentage(id, 720),
-        "90d": getUptimePercentage(id, 2160),
+        "24h": await getUptimePercentage(id, 24),
+        "7d": await getUptimePercentage(id, 168),
+        "30d": await getUptimePercentage(id, 720),
+        "90d": await getUptimePercentage(id, 2160),
       },
       history,
       timestamp: new Date().toISOString(),

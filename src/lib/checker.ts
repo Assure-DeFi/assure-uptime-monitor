@@ -1,12 +1,14 @@
 import https from "https";
 import { URL } from "url";
 import {
-  getDb,
   insertCheckResult,
   getLatestCheckResult,
   isInMaintenanceWindow,
   getConsecutiveFailures,
   getRecentAlertCount,
+  getMonitorCount,
+  insertMonitor,
+  getEnabledMonitors,
   type MonitorRow,
 } from "./db";
 import { sendAlerts } from "./alerts";
@@ -144,7 +146,6 @@ function resolveUrl(url: string): string {
 async function performDomainExpiryCheck(url: string): Promise<CheckResult> {
   try {
     const hostname = new URL(url).hostname;
-    // Use RDAP (modern WHOIS replacement) to check domain expiry
     const rdapUrl = `https://rdap.verisign.com/com/v1/domain/${hostname}`;
     const response = await fetch(rdapUrl, {
       headers: { Accept: "application/rdap+json" },
@@ -187,7 +188,7 @@ async function performDomainExpiryCheck(url: string): Promise<CheckResult> {
     );
 
     let status: "up" | "down" | "degraded" = "up";
-    let errorMessage: string | null =
+    const errorMessage: string | null =
       `Domain expires in ${daysRemaining} days (${expiryDate.toISOString().split("T")[0]})`;
 
     if (daysRemaining <= 0) {
@@ -202,7 +203,7 @@ async function performDomainExpiryCheck(url: string): Promise<CheckResult> {
       status_code: null,
       error_message: errorMessage,
       keyword_found: null,
-      ssl_days_remaining: daysRemaining, // reuse this field for domain days too
+      ssl_days_remaining: daysRemaining,
     };
   } catch (err) {
     return {
@@ -271,13 +272,11 @@ async function performHttpCheck(
     let errorMessage: string | null = null;
     let keywordFound: number | null = null;
 
-    // Check status code
     if (statusCode !== monitor.expected_status) {
       status = "down";
       errorMessage = `Expected status ${monitor.expected_status}, got ${statusCode}`;
     }
 
-    // Check keyword if configured
     if (monitor.expected_keyword) {
       const bodyLower = body.toLowerCase();
       const isNegative = monitor.expected_keyword.startsWith("!");
@@ -287,7 +286,7 @@ async function performHttpCheck(
       const found = bodyLower.includes(keyword);
 
       if (isNegative) {
-        keywordFound = found ? 0 : 1; // 0 = bad (keyword was found but shouldn't be)
+        keywordFound = found ? 0 : 1;
         if (found && status === "up") {
           status = "down";
           errorMessage = `Forbidden keyword "${keyword}" found in response`;
@@ -301,7 +300,6 @@ async function performHttpCheck(
       }
     }
 
-    // Check for error content
     const errorPatterns = [
       "internal server error",
       "application error",
@@ -318,7 +316,6 @@ async function performHttpCheck(
       }
     }
 
-    // Check response time thresholds
     const responseTimeThreshold = monitor.check_type === "json" ? 2000 : 3000;
     if (responseTimeMs > responseTimeThreshold && status === "up") {
       status = "degraded";
@@ -349,33 +346,24 @@ export async function runChecksForPriority(priority?: string): Promise<{
   checked: number;
   results: Array<{ monitor_id: string; status: string }>;
 }> {
-  const db = getDb();
-  const monitors = priority
-    ? (db
-        .prepare("SELECT * FROM monitors WHERE priority = ? AND is_enabled = 1")
-        .all(priority) as MonitorRow[])
-    : (db
-        .prepare("SELECT * FROM monitors WHERE is_enabled = 1")
-        .all() as MonitorRow[]);
-
+  const monitors = await getEnabledMonitors(priority);
   const results: Array<{ monitor_id: string; status: string }> = [];
 
   for (const monitor of monitors) {
     try {
       const result = await performCheck(monitor);
 
-      insertCheckResult({
+      await insertCheckResult({
         monitor_id: monitor.id,
         ...result,
       });
 
       results.push({ monitor_id: monitor.id, status: result.status });
 
-      // Alert logic
       await handleAlertLogic(monitor, result);
     } catch (err) {
       console.error(`Error checking monitor ${monitor.id}:`, err);
-      insertCheckResult({
+      await insertCheckResult({
         monitor_id: monitor.id,
         status: "down",
         response_time_ms: null,
@@ -396,26 +384,26 @@ async function handleAlertLogic(
   monitor: MonitorRow,
   result: CheckResult,
 ): Promise<void> {
-  // Skip alerts during maintenance windows
-  if (isInMaintenanceWindow(monitor.id)) {
+  if (await isInMaintenanceWindow(monitor.id)) {
     return;
   }
 
-  const previousCheck = getLatestCheckResult(monitor.id);
+  const previousCheck = await getLatestCheckResult(monitor.id);
   const wasUp = !previousCheck || previousCheck.status === "up";
 
-  // Down or degraded alert
   if (result.status === "down" || result.status === "degraded") {
-    // "down" alerts immediately; "degraded" requires 2 consecutive failures
     const requiredFailures = result.status === "down" ? 1 : 2;
-    const recentChecks = getConsecutiveFailures(monitor.id, 3);
+    const recentChecks = await getConsecutiveFailures(monitor.id, 3);
     const consecutiveFailures = recentChecks.filter(
       (c) => c.status !== "up",
     ).length;
 
     if (consecutiveFailures >= requiredFailures) {
-      // Throttle: don't re-alert within 30 minutes
-      const recentAlerts = getRecentAlertCount(monitor.id, result.status, 30);
+      const recentAlerts = await getRecentAlertCount(
+        monitor.id,
+        result.status,
+        30,
+      );
       if (recentAlerts === 0) {
         const alertType = result.status === "down" ? "down" : "degraded";
         const message = formatAlertMessage(monitor, result, "alert");
@@ -424,13 +412,11 @@ async function handleAlertLogic(
     }
   }
 
-  // Recovery alert
   if (result.status === "up" && !wasUp && previousCheck) {
     const message = formatAlertMessage(monitor, result, "recovery");
     await sendAlerts(monitor.priority, "recovery", message, monitor.id);
   }
 
-  // SSL expiry alerts
   if (
     monitor.check_type === "ssl" &&
     result.ssl_days_remaining !== null &&
@@ -439,11 +425,11 @@ async function handleAlertLogic(
     const thresholds = [30, 14, 7];
     for (const threshold of thresholds) {
       if (result.ssl_days_remaining <= threshold) {
-        const recentAlerts = getRecentAlertCount(
+        const recentAlerts = await getRecentAlertCount(
           monitor.id,
           "ssl_expiry",
           1440,
-        ); // 24h throttle
+        );
         if (recentAlerts === 0) {
           const message = `SSL Certificate Warning: ${monitor.name} expires in ${result.ssl_days_remaining} days`;
           await sendAlerts(monitor.priority, "ssl_expiry", message, monitor.id);
@@ -481,38 +467,24 @@ function formatAlertMessage(
   return parts.join("\n");
 }
 
-export function seedMonitors(): void {
-  const db = getDb();
-  const existingCount = (
-    db.prepare("SELECT COUNT(*) as cnt FROM monitors").get() as {
-      cnt: number;
-    }
-  ).cnt;
+export async function seedMonitors(): Promise<void> {
+  const count = await getMonitorCount();
+  if (count > 0) return;
 
-  if (existingCount > 0) return;
+  for (const m of MONITORS) {
+    await insertMonitor({
+      id: m.id,
+      name: m.name,
+      url: m.url,
+      category: m.category,
+      priority: m.priority,
+      check_type: m.check_type,
+      expected_status: m.expected_status,
+      expected_keyword: m.expected_keyword ?? null,
+      timeout_ms: m.timeout_ms,
+      interval_seconds: m.interval_seconds,
+    });
+  }
 
-  const insert = db.prepare(
-    `INSERT OR IGNORE INTO monitors (id, name, url, category, priority, check_type, expected_status, expected_keyword, timeout_ms, interval_seconds)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  );
-
-  const insertMany = db.transaction((monitors: typeof MONITORS) => {
-    for (const m of monitors) {
-      insert.run(
-        m.id,
-        m.name,
-        m.url,
-        m.category,
-        m.priority,
-        m.check_type,
-        m.expected_status,
-        m.expected_keyword ?? null,
-        m.timeout_ms,
-        m.interval_seconds,
-      );
-    }
-  });
-
-  insertMany(MONITORS);
   console.log(`Seeded ${MONITORS.length} monitors`);
 }

@@ -4,12 +4,12 @@ import { cleanOldCheckResults } from "./db";
 
 let isStarted = false;
 
-export function startScheduler(): void {
+export async function startScheduler(): Promise<void> {
   if (isStarted) return;
   isStarted = true;
 
   // Seed monitors on startup
-  seedMonitors();
+  await seedMonitors();
 
   console.log("[scheduler] Starting health check scheduler...");
 
@@ -25,9 +25,9 @@ export function startScheduler(): void {
   });
 
   // Daily cleanup of old check results
-  cron.schedule("0 3 * * *", () => {
+  cron.schedule("0 3 * * *", async () => {
     console.log("[scheduler] Cleaning old check results...");
-    cleanOldCheckResults(90);
+    await cleanOldCheckResults(90);
   });
 
   console.log("[scheduler] Scheduler started. All monitors every 5 minutes.");

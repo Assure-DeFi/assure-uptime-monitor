@@ -21,15 +21,15 @@ interface CategoryStatus {
 
 export async function GET() {
   try {
-    seedMonitors();
+    await seedMonitors();
 
-    const monitors = getAllMonitors();
-    const activeIncidents = getActiveIncidents();
+    const monitors = await getAllMonitors();
+    const activeIncidents = await getActiveIncidents();
 
     const categoryMap = new Map<string, CategoryStatus>();
 
     for (const monitor of monitors) {
-      const latestCheck = getLatestCheckResult(monitor.id);
+      const latestCheck = await getLatestCheckResult(monitor.id);
       const monitorStatus = latestCheck?.status ?? "unknown";
 
       if (!categoryMap.has(monitor.category)) {
@@ -44,7 +44,7 @@ export async function GET() {
       category.monitors.push({
         name: monitor.name,
         status: monitorStatus,
-        uptime_90d: getUptimePercentage(monitor.id, 2160),
+        uptime_90d: await getUptimePercentage(monitor.id, 2160),
       });
 
       if (monitorStatus === "down") {
