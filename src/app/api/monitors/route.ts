@@ -10,25 +10,27 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    seedMonitors();
+    await seedMonitors();
 
-    const monitors = getAllMonitors();
-    const monitorsWithStatus = monitors.map((monitor) => {
-      const latestCheck = getLatestCheckResult(monitor.id);
-      return {
-        ...monitor,
-        current_status: latestCheck?.status ?? "unknown",
-        last_checked: latestCheck?.checked_at ?? null,
-        last_response_time_ms: latestCheck?.response_time_ms ?? null,
-        last_status_code: latestCheck?.status_code ?? null,
-        last_error: latestCheck?.error_message ?? null,
-        ssl_days_remaining: latestCheck?.ssl_days_remaining ?? null,
-        uptime_24h: getUptimePercentage(monitor.id, 24),
-        uptime_7d: getUptimePercentage(monitor.id, 168),
-        uptime_30d: getUptimePercentage(monitor.id, 720),
-        uptime_90d: getUptimePercentage(monitor.id, 2160),
-      };
-    });
+    const monitors = await getAllMonitors();
+    const monitorsWithStatus = await Promise.all(
+      monitors.map(async (monitor) => {
+        const latestCheck = await getLatestCheckResult(monitor.id);
+        return {
+          ...monitor,
+          current_status: latestCheck?.status ?? "unknown",
+          last_checked: latestCheck?.checked_at ?? null,
+          last_response_time_ms: latestCheck?.response_time_ms ?? null,
+          last_status_code: latestCheck?.status_code ?? null,
+          last_error: latestCheck?.error_message ?? null,
+          ssl_days_remaining: latestCheck?.ssl_days_remaining ?? null,
+          uptime_24h: await getUptimePercentage(monitor.id, 24),
+          uptime_7d: await getUptimePercentage(monitor.id, 168),
+          uptime_30d: await getUptimePercentage(monitor.id, 720),
+          uptime_90d: await getUptimePercentage(monitor.id, 2160),
+        };
+      }),
+    );
 
     return NextResponse.json({
       monitors: monitorsWithStatus,

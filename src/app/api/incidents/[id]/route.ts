@@ -18,7 +18,7 @@ export async function GET(
       );
     }
 
-    const incident = getIncidentById(incidentId);
+    const incident = await getIncidentById(incidentId);
     if (!incident) {
       return NextResponse.json(
         { error: "Incident not found" },
@@ -51,7 +51,7 @@ export async function PATCH(
       );
     }
 
-    const existing = getIncidentById(incidentId);
+    const existing = await getIncidentById(incidentId);
     if (!existing) {
       return NextResponse.json(
         { error: "Incident not found" },
@@ -96,7 +96,7 @@ export async function PATCH(
     if (description) updates.description = description;
     if (status === "resolved") updates.resolved_at = new Date().toISOString();
 
-    const updated = updateIncident(incidentId, updates);
+    const updated = await updateIncident(incidentId, updates);
 
     return NextResponse.json({ incident: updated });
   } catch (error) {

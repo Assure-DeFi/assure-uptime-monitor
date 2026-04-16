@@ -1,22 +1,214 @@
-import Database from "better-sqlite3";
 import path from "path";
 
-const DB_PATH = path.join(process.cwd(), "data", "health-checker.db");
+// ---------------------------------------------------------------------------
+// Database abstraction — Postgres in production, SQLite in local dev
+//
+// If DATABASE_URL is set, the pg Pool is used (async).
+// If not, better-sqlite3 is used via a thin async wrapper so all exported
+// functions share the same async signature regardless of backend.
+// ---------------------------------------------------------------------------
 
-let db: Database.Database | null = null;
+// --- Shared interfaces ------------------------------------------------------
 
-export function getDb(): Database.Database {
-  if (!db) {
-    db = new Database(DB_PATH);
-    db.pragma("journal_mode = WAL");
-    db.pragma("foreign_keys = ON");
-    initializeSchema(db);
-  }
-  return db;
+export interface MonitorRow {
+  id: string;
+  name: string;
+  url: string;
+  category: string;
+  priority: string;
+  check_type: string;
+  expected_status: number;
+  expected_keyword: string | null;
+  timeout_ms: number;
+  interval_seconds: number;
+  is_enabled: number;
+  created_at: string;
+  updated_at: string;
 }
 
-function initializeSchema(db: Database.Database): void {
-  db.exec(`
+export interface CheckResultRow {
+  id: number;
+  monitor_id: string;
+  status: string;
+  response_time_ms: number | null;
+  status_code: number | null;
+  error_message: string | null;
+  keyword_found: number | null;
+  ssl_days_remaining: number | null;
+  checked_at: string;
+}
+
+export interface IncidentRow {
+  id: number;
+  monitor_id: string | null;
+  title: string;
+  description: string | null;
+  status: string;
+  severity: string;
+  started_at: string;
+  resolved_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Internal DbClient interface
+// ---------------------------------------------------------------------------
+
+interface DbClient {
+  /** Returns 0-N rows. */
+  query<T>(sql: string, params?: unknown[]): Promise<T[]>;
+  /** Returns first row or undefined. */
+  queryOne<T>(sql: string, params?: unknown[]): Promise<T | undefined>;
+  /** Fire-and-forget mutation — no return value. */
+  execute(sql: string, params?: unknown[]): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Postgres backend
+// ---------------------------------------------------------------------------
+
+function buildPgClient(databaseUrl: string): DbClient {
+  // Dynamic require keeps better-sqlite3 out of the require path on Railway
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { Pool } = require("pg") as typeof import("pg");
+
+  const pool = new Pool({ connectionString: databaseUrl });
+
+  /**
+   * Translate SQLite positional `?` placeholders to Postgres `$1, $2, …`
+   * and adjust dialect-specific SQL fragments.
+   */
+  function translate(sql: string): string {
+    let i = 0;
+    let out = sql.replace(/\?/g, () => `$${++i}`);
+
+    // datetime('now') → NOW()::TEXT
+    out = out.replace(/datetime\('now'\)/gi, "NOW()::TEXT");
+
+    // datetime('now', '-X minutes/hours/days') → (NOW() - INTERVAL 'X unit')::TEXT
+    out = out.replace(
+      /datetime\('now',\s*'(-?\d+)\s+(minutes?|hours?|days?)'\)/gi,
+      (_m, num, unit) =>
+        `(NOW() - INTERVAL '${Math.abs(parseInt(num))} ${unit}')::TEXT`,
+    );
+
+    // updated_at = datetime('now') (from updateIncident sets array)
+    out = out.replace(
+      /updated_at\s*=\s*datetime\('now'\)/gi,
+      "updated_at = NOW()::TEXT",
+    );
+
+    return out;
+  }
+
+  return {
+    async query<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+      const { rows } = await pool.query(translate(sql), params);
+      return rows as T[];
+    },
+    async queryOne<T>(
+      sql: string,
+      params: unknown[] = [],
+    ): Promise<T | undefined> {
+      const { rows } = await pool.query(translate(sql), params);
+      return rows[0] as T | undefined;
+    },
+    async execute(sql: string, params: unknown[] = []): Promise<void> {
+      await pool.query(translate(sql), params);
+    },
+  };
+}
+
+// Postgres schema uses SERIAL and NOW() instead of SQLite equivalents
+const PG_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS monitors (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    category TEXT NOT NULL,
+    priority TEXT NOT NULL CHECK (priority IN ('P0', 'P1', 'P2', 'P3')),
+    check_type TEXT NOT NULL DEFAULT 'http' CHECK (check_type IN ('http', 'keyword', 'ssl', 'json', 'domain_expiry')),
+    expected_status INTEGER DEFAULT 200,
+    expected_keyword TEXT,
+    timeout_ms INTEGER DEFAULT 5000,
+    interval_seconds INTEGER NOT NULL DEFAULT 60,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (NOW()::TEXT),
+    updated_at TEXT NOT NULL DEFAULT (NOW()::TEXT)
+  );
+
+  CREATE TABLE IF NOT EXISTS check_results (
+    id SERIAL PRIMARY KEY,
+    monitor_id TEXT NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('up', 'down', 'degraded')),
+    response_time_ms INTEGER,
+    status_code INTEGER,
+    error_message TEXT,
+    keyword_found INTEGER,
+    ssl_days_remaining INTEGER,
+    checked_at TEXT NOT NULL DEFAULT (NOW()::TEXT)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_check_results_monitor_id ON check_results(monitor_id);
+  CREATE INDEX IF NOT EXISTS idx_check_results_checked_at ON check_results(checked_at);
+  CREATE INDEX IF NOT EXISTS idx_check_results_monitor_checked ON check_results(monitor_id, checked_at DESC);
+
+  CREATE TABLE IF NOT EXISTS incidents (
+    id SERIAL PRIMARY KEY,
+    monitor_id TEXT REFERENCES monitors(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'investigating' CHECK (status IN ('investigating', 'identified', 'monitoring', 'resolved')),
+    severity TEXT NOT NULL DEFAULT 'minor' CHECK (severity IN ('critical', 'major', 'minor')),
+    started_at TEXT NOT NULL DEFAULT (NOW()::TEXT),
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (NOW()::TEXT),
+    updated_at TEXT NOT NULL DEFAULT (NOW()::TEXT)
+  );
+
+  CREATE TABLE IF NOT EXISTS incident_updates (
+    id SERIAL PRIMARY KEY,
+    incident_id INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (NOW()::TEXT)
+  );
+
+  CREATE TABLE IF NOT EXISTS maintenance_windows (
+    id SERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT,
+    starts_at TEXT NOT NULL,
+    ends_at TEXT NOT NULL,
+    monitor_ids TEXT,
+    created_at TEXT NOT NULL DEFAULT (NOW()::TEXT)
+  );
+
+  CREATE TABLE IF NOT EXISTS alert_log (
+    id SERIAL PRIMARY KEY,
+    monitor_id TEXT NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
+    alert_type TEXT NOT NULL CHECK (alert_type IN ('down', 'degraded', 'recovery', 'ssl_expiry', 'keyword_missing')),
+    channel TEXT NOT NULL CHECK (channel IN ('telegram', 'email')),
+    message TEXT NOT NULL,
+    sent_at TEXT NOT NULL DEFAULT (NOW()::TEXT)
+  );
+`;
+
+// ---------------------------------------------------------------------------
+// SQLite backend — wraps synchronous better-sqlite3 in async shim
+// ---------------------------------------------------------------------------
+
+function buildSqliteClient(): DbClient {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const BetterSqlite3 =
+    require("better-sqlite3") as typeof import("better-sqlite3");
+  const DB_PATH = path.join(process.cwd(), "data", "health-checker.db");
+  const sqlite = new BetterSqlite3(DB_PATH);
+  sqlite.pragma("journal_mode = WAL");
+  sqlite.pragma("foreign_keys = ON");
+
+  sqlite.exec(`
     CREATE TABLE IF NOT EXISTS monitors (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -89,85 +281,88 @@ function initializeSchema(db: Database.Database): void {
       sent_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  return {
+    async query<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+      return sqlite.prepare(sql).all(...params) as T[];
+    },
+    async queryOne<T>(
+      sql: string,
+      params: unknown[] = [],
+    ): Promise<T | undefined> {
+      return sqlite.prepare(sql).get(...params) as T | undefined;
+    },
+    async execute(sql: string, params: unknown[] = []): Promise<void> {
+      sqlite.prepare(sql).run(...params);
+    },
+  };
 }
 
-// --- Monitor queries ---
+// ---------------------------------------------------------------------------
+// Singleton client initialisation
+// ---------------------------------------------------------------------------
 
-export interface MonitorRow {
-  id: string;
-  name: string;
-  url: string;
-  category: string;
-  priority: string;
-  check_type: string;
-  expected_status: number;
-  expected_keyword: string | null;
-  timeout_ms: number;
-  interval_seconds: number;
-  is_enabled: number;
-  created_at: string;
-  updated_at: string;
+let _client: DbClient | null = null;
+let _pgInitialised = false;
+
+async function getClient(): Promise<DbClient> {
+  if (_client) return _client;
+
+  const databaseUrl = process.env.DATABASE_URL;
+
+  if (databaseUrl) {
+    const pgClient = buildPgClient(databaseUrl);
+    if (!_pgInitialised) {
+      await pgClient.execute(PG_SCHEMA);
+      _pgInitialised = true;
+    }
+    _client = pgClient;
+  } else {
+    // SQLite schema init runs inside buildSqliteClient()
+    _client = buildSqliteClient();
+  }
+
+  return _client;
 }
 
-export interface CheckResultRow {
-  id: number;
-  monitor_id: string;
-  status: string;
-  response_time_ms: number | null;
-  status_code: number | null;
-  error_message: string | null;
-  keyword_found: number | null;
-  ssl_days_remaining: number | null;
-  checked_at: string;
+// ---------------------------------------------------------------------------
+// Public API — all functions are async
+// ---------------------------------------------------------------------------
+
+export async function getAllMonitors(): Promise<MonitorRow[]> {
+  const db = await getClient();
+  return db.query<MonitorRow>("SELECT * FROM monitors ORDER BY priority, name");
 }
 
-export interface IncidentRow {
-  id: number;
-  monitor_id: string | null;
-  title: string;
-  description: string | null;
-  status: string;
-  severity: string;
-  started_at: string;
-  resolved_at: string | null;
-  created_at: string;
-  updated_at: string;
+export async function getMonitorById(
+  id: string,
+): Promise<MonitorRow | undefined> {
+  const db = await getClient();
+  return db.queryOne<MonitorRow>("SELECT * FROM monitors WHERE id = ?", [id]);
 }
 
-export function getAllMonitors(): MonitorRow[] {
-  return getDb()
-    .prepare("SELECT * FROM monitors ORDER BY priority, name")
-    .all() as MonitorRow[];
-}
-
-export function getMonitorById(id: string): MonitorRow | undefined {
-  return getDb().prepare("SELECT * FROM monitors WHERE id = ?").get(id) as
-    | MonitorRow
-    | undefined;
-}
-
-export function getLatestCheckResult(
+export async function getLatestCheckResult(
   monitorId: string,
-): CheckResultRow | undefined {
-  return getDb()
-    .prepare(
-      "SELECT * FROM check_results WHERE monitor_id = ? ORDER BY checked_at DESC LIMIT 1",
-    )
-    .get(monitorId) as CheckResultRow | undefined;
+): Promise<CheckResultRow | undefined> {
+  const db = await getClient();
+  return db.queryOne<CheckResultRow>(
+    "SELECT * FROM check_results WHERE monitor_id = ? ORDER BY checked_at DESC LIMIT 1",
+    [monitorId],
+  );
 }
 
-export function getCheckResultsForMonitor(
+export async function getCheckResultsForMonitor(
   monitorId: string,
   limit: number = 100,
-): CheckResultRow[] {
-  return getDb()
-    .prepare(
-      "SELECT * FROM check_results WHERE monitor_id = ? ORDER BY checked_at DESC LIMIT ?",
-    )
-    .all(monitorId, limit) as CheckResultRow[];
+): Promise<CheckResultRow[]> {
+  const db = await getClient();
+  return db.query<CheckResultRow>(
+    "SELECT * FROM check_results WHERE monitor_id = ? ORDER BY checked_at DESC LIMIT ?",
+    [monitorId, limit],
+  );
 }
 
-export function insertCheckResult(result: {
+export async function insertCheckResult(result: {
   monitor_id: string;
   status: string;
   response_time_ms: number | null;
@@ -175,13 +370,13 @@ export function insertCheckResult(result: {
   error_message: string | null;
   keyword_found: number | null;
   ssl_days_remaining: number | null;
-}): void {
-  getDb()
-    .prepare(
-      `INSERT INTO check_results (monitor_id, status, response_time_ms, status_code, error_message, keyword_found, ssl_days_remaining)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
+}): Promise<void> {
+  const db = await getClient();
+  await db.execute(
+    `INSERT INTO check_results
+       (monitor_id, status, response_time_ms, status_code, error_message, keyword_found, ssl_days_remaining)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
       result.monitor_id,
       result.status,
       result.response_time_ms,
@@ -189,68 +384,103 @@ export function insertCheckResult(result: {
       result.error_message,
       result.keyword_found,
       result.ssl_days_remaining,
-    );
+    ],
+  );
 }
 
-export function getUptimePercentage(monitorId: string, hours: number): number {
-  const row = getDb()
-    .prepare(
-      `SELECT
-        COUNT(*) as total,
-        SUM(CASE WHEN status = 'up' THEN 1 ELSE 0 END) as up_count
-      FROM check_results
-      WHERE monitor_id = ? AND checked_at >= datetime('now', ?)`,
-    )
-    .get(monitorId, `-${hours} hours`) as { total: number; up_count: number };
+export async function getUptimePercentage(
+  monitorId: string,
+  hours: number,
+): Promise<number> {
+  const db = await getClient();
+  const row = await db.queryOne<{
+    total: number | string;
+    up_count: number | string;
+  }>(
+    `SELECT
+       COUNT(*) as total,
+       SUM(CASE WHEN status = 'up' THEN 1 ELSE 0 END) as up_count
+     FROM check_results
+     WHERE monitor_id = ? AND checked_at >= datetime('now', '-${hours} hours')`,
+    [monitorId],
+  );
 
-  if (row.total === 0) return 100;
-  return Math.round((row.up_count / row.total) * 10000) / 100;
+  const total = Number(row?.total ?? 0);
+  const upCount = Number(row?.up_count ?? 0);
+  if (total === 0) return 100;
+  return Math.round((upCount / total) * 10000) / 100;
 }
 
-export function getActiveIncidents(): IncidentRow[] {
-  return getDb()
-    .prepare(
-      "SELECT * FROM incidents WHERE status != 'resolved' ORDER BY started_at DESC",
-    )
-    .all() as IncidentRow[];
+export async function getActiveIncidents(): Promise<IncidentRow[]> {
+  const db = await getClient();
+  return db.query<IncidentRow>(
+    "SELECT * FROM incidents WHERE status != 'resolved' ORDER BY started_at DESC",
+  );
 }
 
-export function getAllIncidents(limit: number = 50): IncidentRow[] {
-  return getDb()
-    .prepare("SELECT * FROM incidents ORDER BY started_at DESC LIMIT ?")
-    .all(limit) as IncidentRow[];
+export async function getAllIncidents(
+  limit: number = 50,
+): Promise<IncidentRow[]> {
+  const db = await getClient();
+  return db.query<IncidentRow>(
+    "SELECT * FROM incidents ORDER BY started_at DESC LIMIT ?",
+    [limit],
+  );
 }
 
-export function getIncidentById(id: number): IncidentRow | undefined {
-  return getDb().prepare("SELECT * FROM incidents WHERE id = ?").get(id) as
-    | IncidentRow
-    | undefined;
+export async function getIncidentById(
+  id: number,
+): Promise<IncidentRow | undefined> {
+  const db = await getClient();
+  return db.queryOne<IncidentRow>("SELECT * FROM incidents WHERE id = ?", [id]);
 }
 
-export function createIncident(incident: {
+export async function createIncident(incident: {
   monitor_id?: string;
   title: string;
   description?: string;
   severity?: string;
-}): IncidentRow {
-  const result = getDb()
-    .prepare(
-      `INSERT INTO incidents (monitor_id, title, description, severity) VALUES (?, ?, ?, ?)
-       RETURNING *`,
-    )
-    .get(
+}): Promise<IncidentRow> {
+  const db = await getClient();
+
+  if (process.env.DATABASE_URL) {
+    // Postgres supports RETURNING
+    const row = await db.queryOne<IncidentRow>(
+      `INSERT INTO incidents (monitor_id, title, description, severity)
+       VALUES (?, ?, ?, ?) RETURNING *`,
+      [
+        incident.monitor_id ?? null,
+        incident.title,
+        incident.description ?? null,
+        incident.severity ?? "minor",
+      ],
+    );
+    if (!row) throw new Error("Failed to create incident");
+    return row;
+  }
+
+  // SQLite: INSERT then fetch
+  await db.execute(
+    `INSERT INTO incidents (monitor_id, title, description, severity)
+     VALUES (?, ?, ?, ?)`,
+    [
       incident.monitor_id ?? null,
       incident.title,
       incident.description ?? null,
       incident.severity ?? "minor",
-    ) as IncidentRow;
-  return result;
+    ],
+  );
+  const row = await db.queryOne<IncidentRow>(
+    "SELECT * FROM incidents ORDER BY id DESC LIMIT 1",
+  );
+  if (!row) throw new Error("Failed to create incident");
+  return row;
 }
 
-export function updateIncident(
+export async function updateIncident(
   id: number,
   updates: { status?: string; resolved_at?: string; description?: string },
-): IncidentRow | undefined {
+): Promise<IncidentRow | undefined> {
   const sets: string[] = [];
   const values: unknown[] = [];
 
@@ -271,64 +501,158 @@ export function updateIncident(
 
   if (sets.length === 1) return getIncidentById(id);
 
-  return getDb()
-    .prepare(`UPDATE incidents SET ${sets.join(", ")} WHERE id = ? RETURNING *`)
-    .get(...values) as IncidentRow | undefined;
+  const db = await getClient();
+
+  if (process.env.DATABASE_URL) {
+    return db.queryOne<IncidentRow>(
+      `UPDATE incidents SET ${sets.join(", ")} WHERE id = ? RETURNING *`,
+      values,
+    );
+  }
+
+  await db.execute(
+    `UPDATE incidents SET ${sets.join(", ")} WHERE id = ?`,
+    values,
+  );
+  return getIncidentById(id);
 }
 
-export function isInMaintenanceWindow(monitorId: string): boolean {
+export async function isInMaintenanceWindow(
+  monitorId: string,
+): Promise<boolean> {
+  const db = await getClient();
   const now = new Date().toISOString();
-  const row = getDb()
-    .prepare(
-      `SELECT COUNT(*) as cnt FROM maintenance_windows
-       WHERE starts_at <= ? AND ends_at >= ?
-       AND (monitor_ids IS NULL OR monitor_ids LIKE ?)`,
-    )
-    .get(now, now, `%${monitorId}%`) as { cnt: number };
-  return row.cnt > 0;
+  const row = await db.queryOne<{ cnt: number | string }>(
+    `SELECT COUNT(*) as cnt FROM maintenance_windows
+     WHERE starts_at <= ? AND ends_at >= ?
+     AND (monitor_ids IS NULL OR monitor_ids LIKE ?)`,
+    [now, now, `%${monitorId}%`],
+  );
+  return Number(row?.cnt ?? 0) > 0;
 }
 
-export function cleanOldCheckResults(daysToKeep: number = 90): void {
+export async function cleanOldCheckResults(
+  daysToKeep: number = 90,
+): Promise<void> {
+  const db = await getClient();
   const cutoff = new Date(
     Date.now() - daysToKeep * 24 * 60 * 60 * 1000,
   ).toISOString();
-  getDb().prepare("DELETE FROM check_results WHERE checked_at < ?").run(cutoff);
+  await db.execute("DELETE FROM check_results WHERE checked_at < ?", [cutoff]);
 }
 
-export function getConsecutiveFailures(
+export async function getConsecutiveFailures(
   monitorId: string,
   count: number,
-): CheckResultRow[] {
-  return getDb()
-    .prepare(
-      `SELECT * FROM check_results WHERE monitor_id = ? ORDER BY checked_at DESC LIMIT ?`,
-    )
-    .all(monitorId, count) as CheckResultRow[];
+): Promise<CheckResultRow[]> {
+  const db = await getClient();
+  return db.query<CheckResultRow>(
+    `SELECT * FROM check_results WHERE monitor_id = ? ORDER BY checked_at DESC LIMIT ?`,
+    [monitorId, count],
+  );
 }
 
-export function getRecentAlertCount(
+export async function getRecentAlertCount(
   monitorId: string,
   alertType: string,
   withinMinutes: number,
-): number {
-  const row = getDb()
-    .prepare(
-      `SELECT COUNT(*) as cnt FROM alert_log
-       WHERE monitor_id = ? AND alert_type = ? AND sent_at >= datetime('now', ?)`,
-    )
-    .get(monitorId, alertType, `-${withinMinutes} minutes`) as { cnt: number };
-  return row.cnt;
+): Promise<number> {
+  const db = await getClient();
+  const row = await db.queryOne<{ cnt: number | string }>(
+    `SELECT COUNT(*) as cnt FROM alert_log
+     WHERE monitor_id = ? AND alert_type = ? AND sent_at >= datetime('now', '-${withinMinutes} minutes')`,
+    [monitorId, alertType],
+  );
+  return Number(row?.cnt ?? 0);
 }
 
-export function logAlert(
+export async function logAlert(
   monitorId: string,
   alertType: string,
   channel: string,
   message: string,
-): void {
-  getDb()
-    .prepare(
-      `INSERT INTO alert_log (monitor_id, alert_type, channel, message) VALUES (?, ?, ?, ?)`,
-    )
-    .run(monitorId, alertType, channel, message);
+): Promise<void> {
+  const db = await getClient();
+  await db.execute(
+    `INSERT INTO alert_log (monitor_id, alert_type, channel, message) VALUES (?, ?, ?, ?)`,
+    [monitorId, alertType, channel, message],
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Helpers used by checker.ts seedMonitors
+// ---------------------------------------------------------------------------
+
+export async function getMonitorCount(): Promise<number> {
+  const db = await getClient();
+  const row = await db.queryOne<{ cnt: number | string }>(
+    "SELECT COUNT(*) as cnt FROM monitors",
+  );
+  return Number(row?.cnt ?? 0);
+}
+
+export async function insertMonitor(m: {
+  id: string;
+  name: string;
+  url: string;
+  category: string;
+  priority: string;
+  check_type: string;
+  expected_status: number;
+  expected_keyword: string | null;
+  timeout_ms: number;
+  interval_seconds: number;
+}): Promise<void> {
+  const db = await getClient();
+  if (process.env.DATABASE_URL) {
+    await db.execute(
+      `INSERT INTO monitors
+         (id, name, url, category, priority, check_type, expected_status, expected_keyword, timeout_ms, interval_seconds)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        m.id,
+        m.name,
+        m.url,
+        m.category,
+        m.priority,
+        m.check_type,
+        m.expected_status,
+        m.expected_keyword,
+        m.timeout_ms,
+        m.interval_seconds,
+      ],
+    );
+  } else {
+    await db.execute(
+      `INSERT OR IGNORE INTO monitors
+         (id, name, url, category, priority, check_type, expected_status, expected_keyword, timeout_ms, interval_seconds)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        m.id,
+        m.name,
+        m.url,
+        m.category,
+        m.priority,
+        m.check_type,
+        m.expected_status,
+        m.expected_keyword,
+        m.timeout_ms,
+        m.interval_seconds,
+      ],
+    );
+  }
+}
+
+export async function getEnabledMonitors(
+  priority?: string,
+): Promise<MonitorRow[]> {
+  const db = await getClient();
+  if (priority) {
+    return db.query<MonitorRow>(
+      "SELECT * FROM monitors WHERE priority = ? AND is_enabled = 1",
+      [priority],
+    );
+  }
+  return db.query<MonitorRow>("SELECT * FROM monitors WHERE is_enabled = 1");
 }

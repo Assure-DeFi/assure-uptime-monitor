@@ -31,36 +31,38 @@ interface MonitorWithStatus {
   uptime_90d: number;
 }
 
-function getMonitorsWithStatus(): MonitorWithStatus[] {
-  seedMonitors();
-  const monitors = getAllMonitors();
+async function getMonitorsWithStatus(): Promise<MonitorWithStatus[]> {
+  await seedMonitors();
+  const monitors = await getAllMonitors();
 
-  return monitors.map((monitor) => {
-    const latestCheck = getLatestCheckResult(monitor.id);
-    return {
-      id: monitor.id,
-      name: monitor.name,
-      url: monitor.url,
-      category: monitor.category,
-      priority: monitor.priority,
-      check_type: monitor.check_type,
-      current_status: latestCheck?.status ?? "unknown",
-      last_checked: latestCheck?.checked_at ?? null,
-      last_response_time_ms: latestCheck?.response_time_ms ?? null,
-      last_error: latestCheck?.error_message ?? null,
-      ssl_days_remaining: latestCheck?.ssl_days_remaining ?? null,
-      uptime_24h: getUptimePercentage(monitor.id, 24),
-      uptime_7d: getUptimePercentage(monitor.id, 168),
-      uptime_30d: getUptimePercentage(monitor.id, 720),
-      uptime_90d: getUptimePercentage(monitor.id, 2160),
-    };
-  });
+  return Promise.all(
+    monitors.map(async (monitor) => {
+      const latestCheck = await getLatestCheckResult(monitor.id);
+      return {
+        id: monitor.id,
+        name: monitor.name,
+        url: monitor.url,
+        category: monitor.category,
+        priority: monitor.priority,
+        check_type: monitor.check_type,
+        current_status: latestCheck?.status ?? "unknown",
+        last_checked: latestCheck?.checked_at ?? null,
+        last_response_time_ms: latestCheck?.response_time_ms ?? null,
+        last_error: latestCheck?.error_message ?? null,
+        ssl_days_remaining: latestCheck?.ssl_days_remaining ?? null,
+        uptime_24h: await getUptimePercentage(monitor.id, 24),
+        uptime_7d: await getUptimePercentage(monitor.id, 168),
+        uptime_30d: await getUptimePercentage(monitor.id, 720),
+        uptime_90d: await getUptimePercentage(monitor.id, 2160),
+      };
+    }),
+  );
 }
 
-export default function StatusPage() {
-  const monitors = getMonitorsWithStatus();
-  const activeIncidents = getActiveIncidents();
-  const recentIncidents = getAllIncidents(10);
+export default async function StatusPage() {
+  const monitors = await getMonitorsWithStatus();
+  const activeIncidents = await getActiveIncidents();
+  const recentIncidents = await getAllIncidents(10);
 
   // Group monitors by category
   const categories = new Map<string, MonitorWithStatus[]>();

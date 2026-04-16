@@ -43,3 +43,14 @@ Persistent memory for the reality-checker agent. Append learnings here.
 **Context**: Validating merge-by-ID logic in use-outreach.ts for accumulated pagination
 **Pattern**: When merging page-0 poll results into accumulated pages via `new Map(prev).set(new)`, updated messages retain their OLD position in iteration order. The `recent` sort mode returns 0 (no re-sort), so order depends on Map insertion order. This is mitigated by: (1) `prev.length <= limit` short-circuit returns fresh array directly, (2) other sort modes re-sort client-side, (3) 30s poll eventually refreshes.
 **Why**: Could cause a briefly stale sort order for messages that received new replies, but self-heals quickly.
+
+## Bug: Parameterized datetime('now', ?) not translated for Postgres
+**Domain**: ops
+**Discovered**: 2026-04-14
+**Type**: constraint
+**Supersedes**: none
+**Invocations-Since**: 0
+**References**: 0
+**Context**: Validating dual-backend SQLite/Postgres migration in health-checker app
+**Pattern**: `translate()` in `buildPgClient` only rewrites INLINE `datetime('now', '-X unit')` patterns. When the interval is a **parameter** (`datetime('now', ?)`), the regex does not match and the raw SQLite call passes through to Postgres, causing a runtime error. Affected functions in db.ts: `getUptimePercentage` (line 404) and `getRecentAlertCount` (line 563). Both pass `-N hours`/`-N minutes` as `$2`/`$3` parameters. Fix: either inline the interval string (no parameter) using JS template literal, or use `NOW() - ($2::text || ' hours')::INTERVAL` with explicit cast in Postgres.
+**Why**: The translate() regex requires the interval to be a literal string in the SQL, not a bound parameter. SQLite accepts `datetime('now', ?)` with a string param; Postgres does not understand `datetime()` at all.

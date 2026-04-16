@@ -183,19 +183,6 @@ export const MONITORS: MonitorConfig[] = [
     { check_type: "http" },
   ),
 
-  // --- Health Check — P0 ---
-  m(
-    "api-health",
-    "Health Check",
-    "https://assuredefi.com/api/health",
-    "API Endpoints",
-    "P0",
-    {
-      check_type: "json",
-      expected_keyword: "healthy",
-    },
-  ),
-
   // --- Public API — P1 ---
   m(
     "api-projects",
