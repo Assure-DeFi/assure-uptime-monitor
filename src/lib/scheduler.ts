@@ -51,6 +51,7 @@ export async function startScheduler(): Promise<void> {
       console.log(
         `[scheduler] Initial check: ${result.checked} monitors checked`,
       );
+      await runOpenRouterCreditCheck();
     } catch (err) {
       console.error("[scheduler] Initial check error:", err);
     }

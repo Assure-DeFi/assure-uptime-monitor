@@ -644,6 +644,91 @@ export async function insertMonitor(m: {
   }
 }
 
+export async function upsertMonitor(m: {
+  id: string;
+  name: string;
+  url: string;
+  category: string;
+  priority: string;
+  check_type: string;
+  expected_status: number;
+  expected_keyword: string | null;
+  timeout_ms: number;
+  interval_seconds: number;
+}): Promise<void> {
+  const db = await getClient();
+  const params = [
+    m.id,
+    m.name,
+    m.url,
+    m.category,
+    m.priority,
+    m.check_type,
+    m.expected_status,
+    m.expected_keyword,
+    m.timeout_ms,
+    m.interval_seconds,
+  ];
+
+  if (process.env.DATABASE_URL) {
+    await db.execute(
+      `INSERT INTO monitors
+         (id, name, url, category, priority, check_type, expected_status, expected_keyword, timeout_ms, interval_seconds, is_enabled)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+       ON CONFLICT (id) DO UPDATE SET
+         name = EXCLUDED.name,
+         url = EXCLUDED.url,
+         category = EXCLUDED.category,
+         priority = EXCLUDED.priority,
+         check_type = EXCLUDED.check_type,
+         expected_status = EXCLUDED.expected_status,
+         expected_keyword = EXCLUDED.expected_keyword,
+         timeout_ms = EXCLUDED.timeout_ms,
+         interval_seconds = EXCLUDED.interval_seconds,
+         is_enabled = 1`,
+      params,
+    );
+  } else {
+    await db.execute(
+      `INSERT INTO monitors
+         (id, name, url, category, priority, check_type, expected_status, expected_keyword, timeout_ms, interval_seconds, is_enabled)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+       ON CONFLICT (id) DO UPDATE SET
+         name = excluded.name,
+         url = excluded.url,
+         category = excluded.category,
+         priority = excluded.priority,
+         check_type = excluded.check_type,
+         expected_status = excluded.expected_status,
+         expected_keyword = excluded.expected_keyword,
+         timeout_ms = excluded.timeout_ms,
+         interval_seconds = excluded.interval_seconds,
+         is_enabled = 1`,
+      params,
+    );
+  }
+}
+
+export async function disableMonitorsNotIn(
+  activeIds: Set<string>,
+): Promise<number> {
+  const db = await getClient();
+  const allMonitors = await db.query<MonitorRow>(
+    "SELECT id FROM monitors WHERE is_enabled = 1",
+  );
+
+  let disabled = 0;
+  for (const monitor of allMonitors) {
+    if (!activeIds.has(monitor.id)) {
+      await db.execute("UPDATE monitors SET is_enabled = 0 WHERE id = ?", [
+        monitor.id,
+      ]);
+      disabled++;
+    }
+  }
+  return disabled;
+}
+
 export async function getEnabledMonitors(
   priority?: string,
 ): Promise<MonitorRow[]> {
