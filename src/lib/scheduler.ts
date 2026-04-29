@@ -1,6 +1,7 @@
 import cron from "node-cron";
 import { runChecksForPriority, seedMonitors } from "./checker";
 import { cleanOldCheckResults } from "./db";
+import { runOpenRouterCreditCheck } from "./openrouter-monitor";
 
 let isStarted = false;
 
@@ -21,6 +22,16 @@ export async function startScheduler(): Promise<void> {
       console.log(`[scheduler] Checked ${result.checked} monitors`);
     } catch (err) {
       console.error("[scheduler] Check error:", err);
+    }
+  });
+
+  // OpenRouter credit limit check: every 20 minutes
+  cron.schedule("*/20 * * * *", async () => {
+    console.log("[scheduler] Running OpenRouter credit check...");
+    try {
+      await runOpenRouterCreditCheck();
+    } catch (err) {
+      console.error("[scheduler] OpenRouter credit check error:", err);
     }
   });
 

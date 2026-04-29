@@ -397,7 +397,7 @@ async function handleAlertLogic(
   const wasUp = !previousCheck || previousCheck.status === "up";
 
   if (result.status === "down" || result.status === "degraded") {
-    const requiredFailures = result.status === "down" ? 1 : 2;
+    const requiredFailures = result.status === "down" ? 3 : 2;
     const recentChecks = await getConsecutiveFailures(monitor.id, 3);
     const consecutiveFailures = recentChecks.filter(
       (c) => c.status !== "up",

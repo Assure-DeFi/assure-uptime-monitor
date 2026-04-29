@@ -57,6 +57,8 @@ Required environment variables:
 | `SMTP_USER` | SMTP username | For SMTP email (alt) |
 | `SMTP_PASS` | SMTP password | For SMTP email (alt) |
 | `CRON_SECRET` | Bearer token for cron endpoint | Production |
+| `OPENROUTER_MANAGEMENT_KEY` | OpenRouter Management API key for credit monitoring | For OpenRouter alerts |
+| `DATABASE_URL` | Postgres connection string (uses SQLite if unset) | Production |
 
 ### Development
 
@@ -144,4 +146,8 @@ SQLite database is stored at `data/health-checker.db`. The schema is automatical
 | P2 (Medium) | No | Yes |
 | P3 (Low) | No | Yes |
 
-Alerts require 2 consecutive failures before triggering (multi-check confirmation). Once triggered, the same alert is throttled for 30 minutes. Recovery notifications are sent when a monitor returns to "up" status.
+Down alerts require 3 consecutive failures before triggering. Degraded alerts require 2. Once triggered, the same alert is throttled for 30 minutes. Recovery notifications are sent when a monitor returns to "up" status.
+
+## OpenRouter Credit Monitoring
+
+A backend-only monitor checks all OpenRouter API keys every 20 minutes via the Management API. Keys approaching their credit limit (>80%) or over limit trigger Telegram alerts. This requires a Management/Provisioning API key set as `OPENROUTER_MANAGEMENT_KEY` — management keys cannot make LLM calls, only read key metadata. New keys added in the OpenRouter dashboard are auto-discovered. No key secrets are ever exposed in alerts or to the frontend.
