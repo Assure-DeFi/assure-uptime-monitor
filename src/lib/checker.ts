@@ -6,8 +6,8 @@ import {
   isInMaintenanceWindow,
   getConsecutiveFailures,
   getRecentAlertCount,
-  getMonitorCount,
-  insertMonitor,
+  upsertMonitor,
+  disableMonitorsNotIn,
   getEnabledMonitors,
   type MonitorRow,
 } from "./db";
@@ -93,8 +93,8 @@ async function checkSslCertificate(url: string): Promise<{
         timeout: 10000,
       },
       () => {
-        const cert = socket.getPeerCertificate();
-        if (cert && cert.valid_to) {
+        const cert = socket.getPeerCertificate(true);
+        if (cert && Object.keys(cert).length > 0 && cert.valid_to) {
           const expiryDate = new Date(cert.valid_to);
           const now = new Date();
           const diffMs = expiryDate.getTime() - now.getTime();
@@ -473,11 +473,10 @@ function formatAlertMessage(
 }
 
 export async function seedMonitors(): Promise<void> {
-  const count = await getMonitorCount();
-  if (count > 0) return;
+  const configIds = new Set(MONITORS.map((m) => m.id));
 
   for (const m of MONITORS) {
-    await insertMonitor({
+    await upsertMonitor({
       id: m.id,
       name: m.name,
       url: m.url,
@@ -491,5 +490,8 @@ export async function seedMonitors(): Promise<void> {
     });
   }
 
-  console.log(`Seeded ${MONITORS.length} monitors`);
+  const removed = await disableMonitorsNotIn(configIds);
+  if (removed > 0) {
+    console.log(`[seed] Disabled ${removed} monitors no longer in config`);
+  }
 }
